@@ -22,7 +22,7 @@ w_inner = 20.0
 w_outer = 10.0
 w_pde = 1.0
 N_test = 250
-seed = 10
+seed = 1
 
 # Struttura rete neurale
 class PINN(nn.Module):
@@ -106,21 +106,47 @@ def training():
     torch.manual_seed(seed)
     model = PINN(hidden_layers=hidden_layers, neurons=neurons).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+
+    loss_history = {
+        "total": [],
+        "pde": [],
+        "inner": [],
+        "outer": []
+    }
+
     print("Fase 1: Adam")
     for epoch in range(1, epochs + 1):
         collocation = sample_points(N_f, R, R_max).to(device)
         inner_bc = circle_boundary(N_inner_bc, R).to(device)
+
         outer_bc_norm, outer_bc_phi = outer_boundary(N_outer_bc, R_max, R, U)
         outer_bc_norm, outer_bc_phi = outer_bc_norm.to(device), outer_bc_phi.to(device)
-        loss, _, _, _ = loss_fn(model, collocation, inner_bc, outer_bc_norm, outer_bc_phi, R, U, w_pde, w_inner, w_outer)
+
+        loss, loss_pde, loss_inner, loss_outer = loss_fn(
+            model, collocation, inner_bc, outer_bc_norm, outer_bc_phi,
+            R, U, w_pde, w_inner, w_outer
+        )
+
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
+
+        loss_history["total"].append(loss.item())
+        loss_history["pde"].append(loss_pde.item())
+        loss_history["inner"].append(loss_inner.item())
+        loss_history["outer"].append(loss_outer.item())
+
         if epoch % 200 == 0:
             print(f"Adam Epoca {epoch:4d}: Loss = {loss.item():.6e}")
 
     print("\nFase 2: L-BFGS")
-    lbfgs = torch.optim.LBFGS(model.parameters(), lr=lr_lbfgs, max_iter=max_iter_lbfgs, history_size=history_size_lbfgs)
+    lbfgs = torch.optim.LBFGS(
+        model.parameters(),
+        lr=lr_lbfgs,
+        max_iter=max_iter_lbfgs,
+        history_size=history_size_lbfgs
+    )
+
     collocation_f = sample_points(N_f, R, R_max).to(device)
     inner_bc_f = circle_boundary(N_inner_bc, R).to(device)
     outer_bc_norm_f, outer_bc_phi_f = outer_boundary(N_outer_bc, R_max, R, U)
@@ -128,14 +154,34 @@ def training():
 
     def closure():
         lbfgs.zero_grad()
-        loss, _, _, _ = loss_fn(model, collocation_f, inner_bc_f, outer_bc_norm_f, outer_bc_phi_f, R, U, w_pde, w_inner, w_outer)
+        loss, _, _, _ = loss_fn(
+            model, collocation_f, inner_bc_f,
+            outer_bc_norm_f, outer_bc_phi_f,
+            R, U, w_pde, w_inner, w_outer
+        )
         loss.backward()
         return loss
+
     for ep in range(1, epochs_lbfgs + 1):
-        loss = lbfgs.step(closure)
+        lbfgs.step(closure)
+
+        loss, loss_pde, loss_inner, loss_outer = loss_fn(
+            model, collocation_f, inner_bc_f,
+            outer_bc_norm_f, outer_bc_phi_f,
+            R, U, w_pde, w_inner, w_outer
+        )
+
+        loss_history["total"].append(loss.item())
+        loss_history["pde"].append(loss_pde.item())
+        loss_history["inner"].append(loss_inner.item())
+        loss_history["outer"].append(loss_outer.item())
+
         if ep % 10 == 0:
             print(f"L-BFGS Epoca {ep:3d}: Loss = {loss.item():.6e}")
-    return model, device
+
+    print(f"\nL-BFGS completato | Loss finale: {loss_history['total'][-1]:.6e}")
+
+    return model, device, loss_history
 
 # Valutazione della velocità
 def evaluate_velocity(model, R, Rmax, N, device):
@@ -165,7 +211,8 @@ def evaluate_velocity(model, R, Rmax, N, device):
             X, Y, mask, l2_u.item(), l2_v.item())
 
 # Plot dei risultati
-def plot_velocity_results(u_pred, v_pred, u_true, v_true, X, Y, mask, l2_u, l2_v, R, Rmax, N):
+def plot_velocity_results(u_pred, v_pred, u_true, v_true, X, Y, mask,
+                          loss_history, l2_u, l2_v, R, R_max, N):
     def to_grid(values, mask, N):
         grid = torch.full((N * N,), float('nan'))
         grid[mask] = values.squeeze().cpu()
@@ -177,39 +224,89 @@ def plot_velocity_results(u_pred, v_pred, u_true, v_true, X, Y, mask, l2_u, l2_v
     v_true_grid = to_grid(v_true, mask, N)
     err_u_grid = to_grid((u_pred - u_true).abs(), mask, N)
     err_v_grid = to_grid((v_pred - v_true).abs(), mask, N)
-    x_ax = torch.linspace(-Rmax, Rmax, N).numpy()
-    y_ax = torch.linspace(-Rmax, Rmax, N).numpy()
-    fig = plt.figure(figsize=(15, 9))
-    gs = fig.add_gridspec(2, 3, hspace=0.35, wspace=0.25)
-    fig.suptitle(f"Campo di velocità attorno al cilindro\nErrore L2 Relativo: u = {l2_u:.2e}, v = {l2_v:.2e}", fontsize=14, fontweight="bold")
-    rows = [("u", u_pinn_grid, u_true_grid, err_u_grid),
-            ("v", v_pinn_grid, v_true_grid, err_v_grid)]
-    titles = ["Soluzione Analitica", "Soluzione PINN", "Errore Assoluto"]
-    cmaps = ["RdBu_r", "RdBu_r", "inferno"]
-    for row_idx, (comp, pinn_grid, true_grid, err_grid) in enumerate(rows):
+
+    x_ax = torch.linspace(-R_max, R_max, N).numpy()
+    y_ax = torch.linspace(-R_max, R_max, N).numpy()
+
+    fig = plt.figure(figsize=(16, 16.6))
+    gs = fig.add_gridspec(
+        3, 3,
+        height_ratios=[2.0, 1.3, 1.3],
+        hspace=0.5,
+        wspace=0.3
+    )
+
+    ax_loss = fig.add_subplot(gs[0, :])
+    ax_loss.plot(loss_history["total"], label="Loss totale", color="black", linewidth=2)
+    ax_loss.plot(loss_history["pde"], label="PDE", color="tab:blue")
+    ax_loss.plot(loss_history["inner"], label="BC interna", color="tab:orange")
+    ax_loss.plot(loss_history["outer"], label="BC esterna", color="tab:green")
+    ax_loss.legend()
+    ax_loss.set_yscale("log")
+    ax_loss.set_xlabel("Epoch")
+    ax_loss.set_ylabel("Loss")
+    ax_loss.grid(True, alpha=0.5)
+
+    fig.suptitle(
+        f"Campo di velocità attorno a un cilindro\n"
+        f"L2 relativo: u = {l2_u:.4f}, v = {l2_v:.4f}",
+        fontsize=13,
+        fontweight="bold",
+        y=0.92
+    )
+
+    rows = [
+        ("u", u_pinn_grid, u_true_grid, err_u_grid),
+        ("v", v_pinn_grid, v_true_grid, err_v_grid),
+    ]
+
+    titles = ["Soluzione Analitica", "Soluzione PINN", "Errore assoluto"]
+    cmaps = ["RdBu_r", "RdBu_r", "hot_r"]
+
+    for row_idx, (comp, pinn_grid, true_grid, err_grid) in enumerate(rows, start=1):
         vmin = np.nanmin(true_grid)
         vmax = np.nanmax(true_grid)
         grids = [true_grid, pinn_grid, err_grid]
+
         for i, (title, grid, cmap) in enumerate(zip(titles, grids, cmaps)):
-            ax = fig.add_subplot(gs[row_idx, i])        
+            ax = fig.add_subplot(gs[row_idx, i])
+
             if i < 2:
-                im = ax.pcolormesh(x_ax, y_ax, grid.T, cmap=cmap, vmin=vmin, vmax=vmax, shading="auto")
+                im = ax.pcolormesh(
+                    x_ax, y_ax, grid.T,
+                    cmap=cmap,
+                    vmin=vmin,
+                    vmax=vmax,
+                    shading="auto"
+                )
             else:
-                im = ax.pcolormesh(x_ax, y_ax, grid.T, cmap=cmap, shading="auto")
+                im = ax.pcolormesh(
+                    x_ax, y_ax, grid.T,
+                    cmap=cmap,
+                    shading="auto"
+                )
+
             circle = plt.Circle((0, 0), R, color="white", zorder=5)
             border = plt.Circle((0, 0), R, color="black", fill=False, linewidth=1.5, zorder=6)
             ax.add_patch(circle)
             ax.add_patch(border)
+
             ax.set_title(f"{title} ({comp})", fontsize=11)
             ax.set_xlabel("x")
             ax.set_ylabel("y")
             ax.set_aspect("equal")
-            ax.set_xlim(-Rmax, Rmax)
-            ax.set_ylim(-Rmax, Rmax)
+            ax.set_xlim(-R_max, R_max)
+            ax.set_ylim(-R_max, R_max)
             plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+
     plt.show()
 
 # Creazione del modello, addestramento, valutazione e plot finale
-model, device = training()
-u_pred, v_pred, u_true, v_true, X, Y, mask, l2_u, l2_v = evaluate_velocity(model, R, R_max, N_test, device)
-plot_velocity_results(u_pred, v_pred, u_true, v_true, X, Y, mask, l2_u, l2_v, R, R_max, N_test)
+model, device, loss_history = training()
+
+u_pred, v_pred, u_true, v_true, X, Y, mask, l2_u, l2_v = evaluate_velocity(
+    model, R, R_max, N_test, device)
+
+plot_velocity_results(
+    u_pred, v_pred, u_true, v_true, X, Y, mask,
+    loss_history, l2_u, l2_v, R, R_max, N_test)
