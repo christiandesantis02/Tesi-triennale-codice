@@ -17,7 +17,6 @@ LAMBDA = dict(pde=1.0, kin=50.0, dyn=50.0, ic=10.0)
 NG = 250
 
 torch.manual_seed(0)
-np.random.seed(0)
 
 
 # ── Modello ───────────────────────────────────────────────────────────────────
