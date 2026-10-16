@@ -3,11 +3,8 @@
 import numpy as np
 import torch
 import torch.nn as nn
-
 import matplotlib.pyplot as plt
 
-DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-print(f"Device: {DEVICE}")
 
 # ── Configurazione ────────────────────────────────────────────────────────────
 N_MODE = 2
@@ -96,10 +93,10 @@ def vel_exact_np(x, y, t):
 
 # ── Punti di collocazione ─────────────────────────────────────────────────────
 def to_tensors(x, y, t):
-  return tuple(
-      torch.tensor(a, dtype=torch.float32, device=DEVICE, requires_grad=True)
-      for a in (x, y, t)
-  )
+    return tuple(
+        torch.tensor(a, dtype=torch.float32, requires_grad=True)
+        for a in (x, y, t)
+    )
 
 
 def make_interior(n):
@@ -181,7 +178,7 @@ def fmt_losses(total, terms):
 def train_adam(model, pts, history):
   opt = torch.optim.Adam(model.parameters(), lr=1e-3)
   sched = torch.optim.lr_scheduler.StepLR(opt, step_size=1000, gamma=0.5)
-  lam = torch.tensor(LAMBDA0, dtype=torch.float32, device=DEVICE)
+  lam = torch.tensor(LAMBDA0, dtype=torch.float32)
   history['lam'] = []
   print(f'\nFase 1: Adam ({N_ADAM} step)')
 
@@ -200,10 +197,10 @@ def train_adam(model, pts, history):
     opt.step()
     sched.step()
     log_history(history, total, terms)
-    history['lam'].append(lam.cpu().numpy().copy())
+    history['lam'].append(lam.numpy().copy())
     if (i + 1) % 500 == 0:
       print(f'  step {i+1:5d}  {fmt_losses(total, terms)}')
-      print(f'            lam = {lam.cpu().numpy().round(2)}')
+      print(f'          lam = {lam.numpy().round(2)}')
   return lam
 
 
@@ -262,29 +259,27 @@ def evaluate(model, grid, t_val):
   phi_ex = mask(phi_exact_np(Xg, Yg, t_val))
   u_ex, v_ex = (mask(a) for a in vel_exact_np(Xg, Yg, t_val))
 
-  xf = torch.tensor(
-      Xg[inside], dtype=torch.float32, device=DEVICE, requires_grad=True
-  )
-  yf = torch.tensor(
-      Yg[inside], dtype=torch.float32, device=DEVICE, requires_grad=True
-  )
-  tf = torch.full_like(xf, t_val)  # eredita già il device di xf
+  # Creazione dei tensori direttamente su CPU (senza device=DEVICE)
+  xf = torch.tensor(Xg[inside], dtype=torch.float32, requires_grad=True)
+  yf = torch.tensor(Yg[inside], dtype=torch.float32, requires_grad=True)
+  tf = torch.full_like(xf, t_val)
+
   phi = model(xf, yf, tf)
+
+  # Calcolo dei gradienti senza .cpu()
   u_p = (
-      torch.autograd.grad(phi.sum(), xf, retain_graph=True)[0]
-      .detach()
-      .cpu()
-      .numpy()
+      torch.autograd.grad(phi.sum(), xf, retain_graph=True)[0].detach().numpy()
   )
-  v_p = torch.autograd.grad(phi.sum(), yf)[0].detach().cpu().numpy()
+  v_p = torch.autograd.grad(phi.sum(), yf)[0].detach().numpy()
 
   def to_grid(a):
     g = np.full_like(Xg, np.nan)
     g[inside] = a
     return g
 
+  # Conversione in NumPy senza .cpu()
   phi_pn, u_pn, v_pn = (
-      to_grid(phi.detach().cpu().numpy()),
+      to_grid(phi.detach().numpy()),
       to_grid(u_p),
       to_grid(v_p),
   )
@@ -431,7 +426,7 @@ def plot_istante(grid, ev, t_label):
 
 print(f'omega = {OMEGA:.4f},  T = {T_END:.4f}')
 pts = make_points()
-model = PINN(HIDDEN, LAYERS).to(DEVICE)
+model = PINN(HIDDEN, LAYERS)
 history, lam = train(model, pts)
 plot_loss(history)
 
